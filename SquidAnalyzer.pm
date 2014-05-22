@@ -4,7 +4,7 @@ package SquidAnalyzer;
 # Name     : SquidAnalyzer.pm
 # Language : Perl 5
 # OS       : All
-# Copyright: Copyright (c) 2001-2013 Gilles Darold - All rights reserved.
+# Copyright: Copyright (c) 2001-2014 Gilles Darold - All rights reserved.
 # Licence  : This program is free software; you can redistribute it
 #            and/or modify it under the same terms as Perl itself.
 # Author   : Gilles Darold, gilles _AT_ darold _DOT_ net
@@ -22,8 +22,8 @@ BEGIN {
 	use Time::HiRes qw/ualarm/;
 
 	# Set all internal variable
-	$VERSION = '5.3';
-	$COPYRIGHT = 'Copyright (c) 2001-2013 Gilles Darold - All rights reserved.';
+	$VERSION = '5.4';
+	$COPYRIGHT = 'Copyright (c) 2001-2014 Gilles Darold - All rights reserved.';
 	$AUTHOR = "Gilles Darold - gilles _AT_ darold _DOT_ net";
 
 	@ISA = qw(Exporter);
@@ -38,7 +38,7 @@ $BZCAT_PROG = "/bin/bzcat";
 $RM_PROG  = "/bin/rm";
 
 # DNS Cache
-my %CACHE = {};
+my %CACHE = ();
 
 # Color used to draw grpahs
 my @GRAPH_COLORS = ('#6e9dc9', '#f4ab3a', '#ac7fa8', '#8dbd0f');
@@ -142,6 +142,8 @@ my %Translate = (
 	'Mime_graph_bytes_title' => 'Mime Type Bytes Statistiques on',
 	'User' => 'User',
 	'Count' => 'Count',
+	'WeekDay' => 'Su Mo Tu We Th Fr Sa',
+	'Week' => 'Week',
 );
 
 my @TLD1 = (
@@ -385,6 +387,15 @@ sub new
 
 }
 
+sub localdie
+{
+	my ($self, $msg) = @_;
+
+	print STDERR "$msg";
+	unlink($self->{pidfile}) if (-e $self->{pidfile});
+	exit 1;
+}
+
 sub parseFile
 {
 	my ($self) = @_;
@@ -399,12 +410,12 @@ sub parseFile
 	my $logfile = new IO::File;
 	if ($self->{LogFile} =~ /\.gz/) {
 		# Open a pipe to zcat program for compressed log
-		$logfile->open("$ZCAT_PROG $self->{LogFile} |") || die "ERROR: cannot read from pipe to $ZCAT_PROG $self->{LogFile}. $!\n";
+		$logfile->open("$ZCAT_PROG $self->{LogFile} |") || $self->localdie("ERROR: cannot read from pipe to $ZCAT_PROG $self->{LogFile}. $!\n");
 	} elsif ($self->{LogFile} =~ /\.bz2/) {
 		# Open a pipe to zcat program for compressed log
-		$logfile->open("$BZCAT_PROG $self->{LogFile} |") || die "ERROR: cannot read from pipe to $BZCAT_PROG $self->{LogFile}. $!\n";
+		$logfile->open("$BZCAT_PROG $self->{LogFile} |") || $self->localdie("ERROR: cannot read from pipe to $BZCAT_PROG $self->{LogFile}. $!\n");
 	} else {
-		$logfile->open($self->{LogFile}) || die "ERROR: Unable to open Squid access.log file $self->{LogFile}. $!\n";
+		$logfile->open($self->{LogFile}) || $self->localdie("ERROR: Unable to open Squid access.log file $self->{LogFile}. $!\n");
 	}
 
 	my $line = '';
@@ -441,6 +452,9 @@ sub parseFile
 			$bytes = $5 || 0;
 			$method = $6 || '';
 
+			# Do not parse some unwanted method
+			next if (($#{$self->{ExcludedMethods}} >= 0) && grep(/^$method$/, @{$self->{ExcludedMethods}}));
+
 			# Go to last parsed date (incremental mode)
 			next if ($self->{history_time} && ($time <= $self->{history_time}));
 
@@ -469,10 +483,13 @@ sub parseFile
 				$status = lc($3) || '';
 				$mime_type = lc($4) || '';
 				$mime_type = 'none' if (!$mime_type || ($mime_type eq '-'));
+
+				# Do not parse some unwanted method
+				next if (($#{$self->{ExcludedMimes}} >= 0) && map {$mime_type =~ m#^$_$#} @{$self->{ExcludedMimes}});
+
 				# Remove extra space character in username
 				$login =~ s/\%20//g;
 
-				my $found = 0;
 				# Set default user login to client ip address
 				my $id = $client_ip || '';
 				if ($login ne '-') {
@@ -480,6 +497,51 @@ sub parseFile
 				}
 				next if (!$id || !$bytes);
 
+				my $found = 0;
+
+				#####
+				# If there's some mandatory inclusion, check the entry against the definitions
+				#####
+				if (exists $self->{Include}{users} || exists $self->{Include}{clients} || exists $self->{Include}{networks}) {
+					# check for user inclusion
+					if (exists $self->{Include}{users}) {
+						foreach my $e (@{$self->{Include}{users}}) {
+							if ($login =~ m#^$e$#i) {
+								$found = 1;
+								last;
+							}
+						}
+					}
+
+					# check for client inclusion
+					if (exists $self->{Include}{clients}) {
+						foreach my $e (@{$self->{Include}{clients}}) {
+							if ($client_ip =~ m#^$e$#i) {
+								$found = 1;
+								last;
+							}
+						}
+					}
+
+					# check for Network inclusion
+					if (exists $self->{Include}{networks}) {
+						foreach my $e (@{$self->{Include}{networks}}) {
+							if (&check_ip($client_ip, $e)) {
+								$found = 1;
+								last;
+							}
+						}
+					}
+
+					# The entry is not allowed in included file so skip it
+					next if (!$found);
+					$found = 0;
+				}
+
+				#####
+				# Check the entry against the exclusion definitions. The entry
+				# is skipped directly when it match an exclusion definition.
+				#####
 				# check for user exclusion
 				if (exists $self->{Exclude}{users}) {
 					foreach my $e (@{$self->{Exclude}{users}}) {
@@ -502,10 +564,10 @@ sub parseFile
 					next if ($found);
 				}
 
-				# check for URL exclusion
-				if (exists $self->{Exclude}{uris}) {
-					foreach my $e (@{$self->{Exclude}{uris}}) {
-						if ($url =~ m#^$e$#i) {
+				# check for Network exclusion
+				if (exists $self->{Exclude}{networks}) {
+					foreach my $e (@{$self->{Exclude}{networks}}) {
+						if (&check_ip($client_ip, $e)) {
 							$found = 1;
 							last;
 						}
@@ -513,10 +575,10 @@ sub parseFile
 					next if ($found);
 				}
 
-				# check for Network exclusion
-				if (exists $self->{Exclude}{networks}) {
-					foreach my $e (@{$self->{Exclude}{networks}}) {
-						if (&check_ip($client_ip, $e)) {
+				# check for URL exclusion
+				if (exists $self->{Exclude}{uris}) {
+					foreach my $e (@{$self->{Exclude}{uris}}) {
+						if ($url =~ m#^$e$#i) {
 							$found = 1;
 							last;
 						}
@@ -559,12 +621,26 @@ sub parseFile
 		# Set the current start time into history file
 		if ($self->{end_time}) {
 			my $current = new IO::File;
-			$current->open(">$self->{Output}/SquidAnalyzer.current") or die "Error: Can't write to file $self->{Output}/SquidAnalyzer.current, $!\n";
+			$current->open(">$self->{Output}/SquidAnalyzer.current") or $self->localdie("Error: Can't write to file $self->{Output}/SquidAnalyzer.current, $!\n");
 			print $current "$self->{end_time}";
 			$current->close;
 		}
 
+		# Compute week statistics
+		$self->_clear_stats();
+		if (!$self->{QuietMode}) {
+			print STDERR "Generating weekly data files now...\n";
+		}
+		my $wn = &get_week_number("$self->{last_year}", "$self->{last_month}", "$self->{last_day}");
+		my @wd = &get_wdays_per_month($wn, "$self->{last_year}-$self->{last_month}");
+		$wn++;
+
+		print STDERR "Compute and dump weekly statistics for week $wn on $self->{last_year}\n" if (!$self->{QuietMode});
+		$self->_save_data("$self->{last_year}", "$self->{last_month}", "$self->{last_day}", sprintf("%02d", $wn), @wd);
+
+
 		# Compute month statistics
+		$self->_clear_stats();
 		if (!$self->{QuietMode}) {
 			print STDERR "Generating monthly data files now...\n";
 		}
@@ -578,6 +654,7 @@ sub parseFile
 		}
 
 		# Compute year statistics
+		$self->_clear_stats();
 		if (!$self->{no_year_stat}) {
 			if (!$self->{QuietMode}) {
 				print STDERR "Compute and dump year statistics for $self->{first_year} to $self->{last_year}\n";
@@ -634,11 +711,12 @@ sub _clear_stats
 
 sub _init
 {
-	my ($self, $conf_file, $log_file, $debug, $rebuild) = @_;
+	my ($self, $conf_file, $log_file, $debug, $rebuild, $pidfile) = @_;
 
 	# Prevent for a call without instance
 	if (!ref($self)) {
 		print STDERR "ERROR - init : Unable to call init without an object instance.\n";
+		unlink("$pidfile");
 		exit(0);
 	}
 
@@ -650,7 +728,7 @@ sub _init
 			$conf_file = 'squidanalyzer.conf';
 		}
 	}
-	my %options = &parse_config($conf_file, $log_file, $rebuild);
+	my %options = $self->parse_config($conf_file, $log_file, $rebuild);
 
 	# Configuration options
 	$self->{MinPie} = $options{MinPie} || 2;
@@ -671,11 +749,23 @@ sub _init
 	$self->{UseClientDNSName} = $options{UseClientDNSName} || 0;
 	$self->{DNSLookupTimeout} = $options{DNSLookupTimeout} || 0.0001;
 	$self->{DNSLookupTimeout} = int($self->{DNSLookupTimeout} * 1000000);
+	$self->{pidfile} = $pidfile || '/tmp/squid-analyzer.pid';
+	$self->{CustomHeader} = $options{CustomHeader} || qq{<a href="$self->{WebUrl}"><img src="$self->{WebUrl}images/logo-squidanalyzer.png" title="SquidAnalyzer $VERSION" border="0"></a> SquidAnalyzer};
+	$self->{ExcludedMethods} = ();
+	if ($options{ExcludedMethods}) {
+		push(@{$self->{ExcludedMethods}}, split(/\s*,\s*/, $options{ExcludedMethods}));
+	}
+	$self->{ExcludedMimes} = ();
+	if ($options{ExcludedMimes}) {
+		push(@{$self->{ExcludedMimes}}, split(/\s*,\s*/, $options{ExcludedMimes}));
+	}
+
 
 	if ($self->{Lang}) {
 		open(IN, "$self->{Lang}") or die "ERROR: can't open translation file $self->{Lang}, $!\n";
 		while (my $l = <IN>) {
 			chomp($l);
+			$l =~ s/\r//gs;
 			next if ($l =~ /^[\s\t]*#/);
 			next if (!$l);
 			my ($key, $str) = split(/\t+/, $l);
@@ -709,9 +799,10 @@ sub _init
 	if ($self->{OrderMime} !~ /^(hits|bytes)$/) {
 		die "ERROR: OrderMime must be one of these values: hits or bytes\n";
 	}
-	%{$self->{NetworkAlias}} = &parse_network_aliases($options{NetworkAlias} || '');
-	%{$self->{UserAlias}}    = &parse_user_aliases($options{UserAlias} || '');
-	%{$self->{Exclude}}      = &parse_exclusion($options{Exclude} || '');
+	%{$self->{NetworkAlias}} = $self->parse_network_aliases($options{NetworkAlias} || '');
+	%{$self->{UserAlias}}    = $self->parse_user_aliases($options{UserAlias} || '');
+	%{$self->{Exclude}}      = $self->parse_exclusion($options{Exclude} || '');
+	%{$self->{Include}}      = $self->parse_inclusion($options{Include} || '');
 
 	$self->{CostPrice} = $options{CostPrice} || 0;
 	$self->{Currency} = $options{Currency} || '&euro;';
@@ -1021,11 +1112,14 @@ sub _parseData
 
 sub _save_stat
 {
-	my ($self, $year, $month, $day) = @_;
+	my ($self, $year, $month, $day, $wn, @wd) = @_;
 
 	my $type = 'hour';
 	if (!$day) {
 		$type = 'day';
+	}
+	if ($wn) {
+		$type = 'week';
 	}
 	if (!$month) {
 		$type = 'month';
@@ -1039,6 +1133,13 @@ sub _save_stat
 		foreach my $d ("01" .. "31") {
 			$self->_read_stat($year, $month, $d, 'day');
 		}
+	} elsif ($type eq 'week') {
+		$path = "$year/week$wn";
+		foreach my $wdate (@wd) {
+			$wdate =~ /^(\d+)-(\d+)-(\d+)$/;
+			$self->_read_stat($1, $2, $3, 'day', $wn);
+		}
+		$type = 'day';
 	} elsif ($type eq 'month') {
 		foreach my $m ("01" .. "12") {
 			$self->_read_stat($year, $m, $day, 'month');
@@ -1053,7 +1154,7 @@ sub _save_stat
 	if ($self->{UrlReport}) {
 		my $dat_file_user_url = new IO::File;
 		$dat_file_user_url->open(">$self->{Output}/$path/stat_user_url.dat")
-			or die "ERROR: Can't write to file $self->{Output}/$path/stat_user_url.dat, $!\n";
+			or $self->localdie("ERROR: Can't write to file $self->{Output}/$path/stat_user_url.dat, $!\n");
 		foreach my $id (sort {$a cmp $b} keys %{$self->{"stat_user_url_$type"}}) {
 			foreach my $dest (keys %{$self->{"stat_user_url_$type"}{$id}}) {
 				$dat_file_user_url->print("$id hits=" . $self->{"stat_user_url_$type"}{$id}{$dest}{hits} . ";" .
@@ -1071,7 +1172,7 @@ sub _save_stat
 	#### Save user statistics
 	my $dat_file_user = new IO::File;
 	$dat_file_user->open(">$self->{Output}/$path/stat_user.dat")
-		or die "ERROR: Can't write to file $self->{Output}/$path/stat_user.dat, $!\n";
+		or $self->localdie("ERROR: Can't write to file $self->{Output}/$path/stat_user.dat, $!\n");
 	foreach my $id (sort {$a cmp $b} keys %{$self->{"stat_user_$type"}}) {
 		my $name = $id;
 		$name =~ s/\s+//g;
@@ -1097,7 +1198,7 @@ sub _save_stat
 	#### Save network statistics
 	my $dat_file_network = new IO::File;
 	$dat_file_network->open(">$self->{Output}/$path/stat_network.dat")
-		or die "ERROR: Can't write to file $self->{Output}/$path/stat_network.dat, $!\n";
+		or $self->localdie("ERROR: Can't write to file $self->{Output}/$path/stat_network.dat, $!\n");
 	foreach my $net (sort {$a cmp $b} keys %{$self->{"stat_network_$type"}}) {
 		$dat_file_network->print("$net\thits_$type=");
 		foreach my $tmp (sort {$a <=> $b} keys %{$self->{"stat_network_$type"}{$net}}) {
@@ -1121,7 +1222,7 @@ sub _save_stat
 	#### Save user per network statistics
 	my $dat_file_netuser = new IO::File;
 	$dat_file_netuser->open(">$self->{Output}/$path/stat_netuser.dat")
-		or die "ERROR: Can't write to file $self->{Output}/$path/stat_netuser.dat, $!\n";
+		or $self->localdie("ERROR: Can't write to file $self->{Output}/$path/stat_netuser.dat, $!\n");
 	foreach my $net (sort {$a cmp $b} keys %{$self->{"stat_netuser_$type"}}) {
 		foreach my $id (sort {$a cmp $b} keys %{$self->{"stat_netuser_$type"}{$net}}) {
 			$dat_file_netuser->print("$net\t$id\thits=" . $self->{"stat_netuser_$type"}{$net}{$id}{hits} . ";" .
@@ -1139,7 +1240,7 @@ sub _save_stat
 	#### Save cache statistics
 	my $dat_file_code = new IO::File;
 	$dat_file_code->open(">$self->{Output}/$path/stat_code.dat")
-		or die "ERROR: Can't write to file $self->{Output}/$path/stat_code.dat, $!\n";
+		or $self->localdie("ERROR: Can't write to file $self->{Output}/$path/stat_code.dat, $!\n");
 	foreach my $code (sort {$a cmp $b} keys %{$self->{"stat_code_$type"}}) {
 		$dat_file_code->print("$code " .
 			"hits_$type=");
@@ -1159,7 +1260,7 @@ sub _save_stat
 	#### Save mime statistics
 	my $dat_file_mime_type = new IO::File;
 	$dat_file_mime_type->open(">$self->{Output}/$path/stat_mime_type.dat")
-		or die "ERROR: Can't write to file $self->{Output}/$path/stat_mime_type.dat, $!\n";
+		or $self->localdie("ERROR: Can't write to file $self->{Output}/$path/stat_mime_type.dat, $!\n");
 	foreach my $mime (sort {$a cmp $b} keys %{$self->{"stat_mime_type_$type"}}) {
 		$dat_file_mime_type->print("$mime hits=" . $self->{"stat_mime_type_$type"}{$mime}{hits} . ";" .
 			"bytes=" . $self->{"stat_mime_type_$type"}{$mime}{bytes} .  "\n");
@@ -1171,30 +1272,30 @@ sub _save_stat
 
 sub _save_data
 {
-	my ($self, $year, $month, $day) = @_;
-
-	my $path = join('/', $year, $month, $day);
-	$path =~ s/[\/]+$//;
+	my ($self, $year, $month, $day, $wn, @wd) = @_;
 
 	#### Create directory structure
 	if (!-d "$self->{Output}/$year") {
-		mkdir("$self->{Output}/$year", 0755) || die "ERROR: can't create directory $self->{Output}/$year, $!\n";
+		mkdir("$self->{Output}/$year", 0755) || $self->localdie("ERROR: can't create directory $self->{Output}/$year, $!\n");
 	}
 	if ($month && !-d "$self->{Output}/$year/$month") {
-		mkdir("$self->{Output}/$year/$month", 0755) || die "ERROR: can't create directory $self->{Output}/$year/$month, $!\n";
+		mkdir("$self->{Output}/$year/$month", 0755) || $self->localdie("ERROR: can't create directory $self->{Output}/$year/$month, $!\n");
 	}
 	if ($day && !-d "$self->{Output}/$year/$month/$day") {
-		mkdir("$self->{Output}/$year/$month/$day", 0755) || die "ERROR: can't create directory $self->{Output}/$year/$month/$day, $!\n";
+		mkdir("$self->{Output}/$year/$month/$day", 0755) || $self->localdie("ERROR: can't create directory $self->{Output}/$year/$month/$day, $!\n");
+	}
+	if ($wn && !-d "$self->{Output}/$year/week$wn") {
+		mkdir("$self->{Output}/$year/week$wn", 0755) || $self->localdie("ERROR: can't create directory $self->{Output}/$year/week$wn, $!\n");
 	}
 	# Dumping data
-	$self->_save_stat($year, $month, $day);
+	$self->_save_stat($year, $month, $day, $wn, @wd);
 
 }
 
 
 sub _read_stat
 {
-	my ($self, $year, $month, $day, $sum_type) = @_;
+	my ($self, $year, $month, $day, $sum_type, $wn) = @_;
 
 	my $type = 'hour';
 	if (!$day) {
@@ -1253,6 +1354,7 @@ sub _read_stat
 			} else {
 				print STDERR "ERROR: bad format at line $i into $self->{Output}/$path/stat_user.dat:\n";
 				print STDERR "$l\n";
+				unlink($self->{pidfile});
 				exit 0;
 			}
 			$i++;
@@ -1280,6 +1382,7 @@ sub _read_stat
 				} else {
 					print STDERR "ERROR: bad format at line $i into $self->{Output}/$path/stat_user_url.dat\n";
 					print STDERR "$l\n";
+					unlink($self->{pidfile});
 					exit 0;
 				}
 				$i++;
@@ -1330,6 +1433,7 @@ sub _read_stat
 			} else {
 				print STDERR "ERROR: bad format at line $i into $self->{Output}/$path/stat_network.dat\n";
 				print STDERR "$l\n";
+				unlink($self->{pidfile});
 				exit 0;
 			}
 			$i++;
@@ -1362,6 +1466,7 @@ sub _read_stat
 			} else {
 				print STDERR "ERROR: bad format at line $i into $self->{Output}/$path/stat_netuser.dat\n";
 				print STDERR "$l\n";
+				unlink($self->{pidfile});
 				exit 0;
 			}
 			$i++;
@@ -1394,6 +1499,7 @@ sub _read_stat
 			} else {
 				print STDERR "ERROR: bad format at line $i into $self->{Output}/$path/stat_code.dat\n";
 				print STDERR "$l\n";
+				unlink($self->{pidfile});
 				exit 0;
 			}
 			$i++;
@@ -1414,6 +1520,7 @@ sub _read_stat
 			} else {
 				print STDERR "ERROR: bad format at line $i into $self->{Output}/$path/stat_mime_type.dat\n";
 				print STDERR "$l\n";
+				unlink($self->{pidfile});
 				exit 0;
 			}
 			$i++;
@@ -1455,8 +1562,7 @@ sub _print_header
 	<div id="header">
 		<div id="alignLeft">
 		<h1>
-		<a href="$self->{WebUrl}"><img src="$self->{WebUrl}images/logo-squidanalyzer.png" title="SquidAnalyzer $VERSION" border="0"></a>
-		SquidAnalyzer
+		$self->{CustomHeader}
 		</h1>
 		<p class="sous-titre">
 		$Translate{'Generation'} $now.
@@ -1552,9 +1658,11 @@ sub buildHTML
 			next;
 		}
 		next if (!$p_year && ($y < $old_year));
-		opendir(DIR, "$outdir/$y") || die "Error: can't opendir $outdir/$y: $!";
+		opendir(DIR, "$outdir/$y") || $self->localdie("Error: can't opendir $outdir/$y: $!");
 		my @months = grep { /^\d{2}$/ && -d "$outdir/$y/$_"} readdir(DIR);
+		my @weeks  = grep { /^week\d{2}$/ && -d "$outdir/$y/$_"} readdir(DIR);
 		closedir DIR;
+		my @weeks_to_build = ();
 		foreach my $m (sort {$a <=> $b} @months) {
 			next if (!$m);
 			next if ($self->check_build_date($y, $m));
@@ -1565,7 +1673,7 @@ sub buildHTML
 				next;
 			}
 			next if ("$y$m" < "$old_year$old_month");
-			opendir(DIR, "$outdir/$y/$m") || die "Error: can't opendir $outdir/$y/$m: $!";
+			opendir(DIR, "$outdir/$y/$m") || $self->localdie("Error: can't opendir $outdir/$y/$m: $!");
 			my @days = grep { /^\d{2}$/ && -d "$outdir/$y/$m/$_"} readdir(DIR);
 			closedir DIR;
 			foreach my $d (sort {$a <=> $b} @days) {
@@ -1573,9 +1681,16 @@ sub buildHTML
 				next if ("$y$m$d" < "$old_year$old_month$old_day");
 				print STDERR "Generating daily statistics for day $y-$m-$d\n" if (!$self->{QuietMode});
 				$self->gen_html_output($outdir, $y, $m, $d);
+				my $wn = &get_week_number($y,$m,$d);
+				push(@weeks_to_build, $wn) if (!grep(/^$wn$/, @weeks_to_build));
 			}
 			print STDERR "Generating monthly statistics for month $y-$m\n" if (!$self->{QuietMode});
 			$self->gen_html_output($outdir, $y, $m);
+		}
+		foreach my $w (sort @weeks_to_build) {
+			$w = sprintf("%02d", $w+1);
+			print STDERR "Generating weekly statistics for week $w on year $y\n" if (!$self->{QuietMode});
+			$self->gen_html_output($outdir, $y, '', '', $w);
 		}
 		print STDERR "Generating yearly statistics for year $y\n" if (!$self->{QuietMode});
 		$self->gen_html_output($outdir, $y);
@@ -1590,7 +1705,7 @@ sub buildHTML
 
 sub gen_html_output
 {
-	my ($self, $outdir, $year, $month, $day) = @_;
+	my ($self, $outdir, $year, $month, $day, $week) = @_;
 
 	my $dir = "$outdir";
 	if ($year) {
@@ -1604,25 +1719,30 @@ sub gen_html_output
 	}
 	my $stat_date = $self->set_date($year, $month, $day);
 
+	if ($week) {
+		$dir .= "/week$week";
+		$stat_date = "$Translate{Week} $week - $year";
+	}
+
 	my $nuser = 0;
 	my $nurl = 0;
 	my $ndomain = 0;
-	if ( !$self->{no_year_stat} || $month ) {
+	if ( !$self->{no_year_stat} || $month || $week) {
 		print STDERR "\tUser statistics in $dir...\n" if (!$self->{QuietMode});
-		$nuser = $self->_print_user_stat($dir, $year, $month, $day);
+		$nuser = $self->_print_user_stat($dir, $year, $month, $day, $week);
 		print STDERR "\tMime type statistics in $dir...\n" if (!$self->{QuietMode});
-		$self->_print_mime_stat($dir, $year, $month, $day);
+		$self->_print_mime_stat($dir, $year, $month, $day, $week);
 		print STDERR "\tNetwork statistics in $dir...\n" if (!$self->{QuietMode});
-		$self->_print_network_stat($dir, $year, $month, $day);
+		$self->_print_network_stat($dir, $year, $month, $day, $week);
 		if ($self->{UrlReport}) {
 			print STDERR "\tTop URL statistics in $dir...\n" if (!$self->{QuietMode});
-			$nurl = $self->_print_top_url_stat($dir, $year, $month, $day);
+			$nurl = $self->_print_top_url_stat($dir, $year, $month, $day, $week);
 			print STDERR "\tTop domain statistics in $dir...\n" if (!$self->{QuietMode});
-			$ndomain = $self->_print_top_domain_stat($dir, $year, $month, $day);
+			$ndomain = $self->_print_top_domain_stat($dir, $year, $month, $day, $week);
 		}
 	}
 	print STDERR "\tCache statistics in $dir...\n" if (!$self->{QuietMode});
-	$self->_print_cache_stat($dir, $year, $month, $day, $nuser, $nurl, $ndomain);
+	$self->_print_cache_stat($dir, $year, $month, $day, $nuser, $nurl, $ndomain, $week);
 
 	return ($nuser, $nurl, $ndomain);
 }
@@ -1644,7 +1764,7 @@ sub parse_duration
 
 sub _print_cache_stat
 {
-	my ($self, $outdir, $year, $month, $day, $nuser, $nurl, $ndomain) = @_;
+	my ($self, $outdir, $year, $month, $day, $nuser, $nurl, $ndomain, $week) = @_;
 
 	my $stat_date = $self->set_date($year, $month, $day);
 
@@ -1654,6 +1774,9 @@ sub _print_cache_stat
 	}
 	if (!$month) {
 		$type = 'month';
+	}
+	if ($week) {
+		$type = 'day';
 	}
 
 	# Load code statistics
@@ -1686,17 +1809,21 @@ sub _print_cache_stat
 	my $total_bytes = $code_stat{HIT}{bytes} + $code_stat{MISS}{bytes};
 	my $total_denied =  $code_stat{DENIED}{request} + $code_stat{DENIED}{request};
 
+	if ($week && !-d "$outdir") {
+		return;
+	}
 	my $file = $outdir . '/index.html';
 	my $out = new IO::File;
-	$out->open(">$file") || die "ERROR: Unable to open $file. $!\n";
+	$out->open(">$file") || $self->localdie("ERROR: Unable to open $file. $!\n");
 	# Print the HTML header
 	my $cal = $self->_get_calendar($stat_date, $type, $outdir);
+	$cal = '' if ($week);
 	if ( !$self->{no_year_stat} || ($type ne 'month') ) {
 		$self->_print_header(\$out, $self->{menu}, $cal);
-		print $out $self->_print_title($Translate{'Cache_title'}, $stat_date);
+		print $out $self->_print_title($Translate{'Cache_title'}, $stat_date, $week);
 	} else {
 		$self->_print_header(\$out, $self->{menu3}, $cal);
-		print $out $self->_print_title($Translate{'Cache_title'}, $stat_date);
+		print $out $self->_print_title($Translate{'Cache_title'}, $stat_date, $week);
 		%code_stat = ();
 		$self->_print_footer(\$out);
 		$out->close();
@@ -1711,26 +1838,38 @@ sub _print_cache_stat
 	my $colspn = 5;
 	$colspn = 6 if ($self->{CostPrice});
 
-	my $last = '23';
-	my $first = '00';
 	my $title = $Translate{'Hourly'} || 'Hourly';
 	my $unit = $Translate{'Hours'} || 'Hours';
+	my @xaxis = ();
 	if ($type eq 'day') {
-		$last = '31';
-		$first = '01';
-		$title = $Translate{'Daily'} || 'Daily';
+		if (!$week) {
+			$title = $Translate{'Daily'} || 'Daily';
+			for ("01" .. "31") {
+				push(@xaxis, "$_");
+			}
+		} else {
+			@xaxis = &get_wdays_per_year($week - 1, $year);
+			$title = $Translate{'Weekly'} || 'Weekly';
+			$type = 'week';
+			$type = '[' . join(',', @xaxis) . ']';
+		}
 		$unit = $Translate{'Days'} || 'Days';
 	} elsif ($type eq 'month') {
-		$last = '12';
-		$first = '01';
 		$title = $Translate{'Monthly'} || 'Monthly';
 		$unit = $Translate{'Months'} || 'Months';
+		for ("01" .. "12") {
+			push(@xaxis, "$_");
+		}
+	} else {
+		for ("00" .. "23") {
+			push(@xaxis, "$_");
+		}
 	}
 	my @hit = ();
 	my @miss = ();
 	my @denied = ();
 	my @total = ();
-	for ("$first" .. "$last") {
+	foreach (@xaxis) {
 		my $tot = 0;
 		if (exists $detail_code_stat{HIT}{$_}{request}) {
 			push(@hit, "[ $_, $detail_code_stat{HIT}{$_}{request} ]");
@@ -1770,7 +1909,7 @@ sub _print_cache_stat
 	@denied = ();
 	@total = ();
 
-	for ("$first" .. "$last") {
+	foreach (@xaxis) {
 		my $tot = 0;
 		if (exists $detail_code_stat{HIT}{$_}{bytes}) {
 			push(@hit, "[ $_, " . int($detail_code_stat{HIT}{$_}{bytes}/1000000) . " ]");
@@ -1878,7 +2017,7 @@ sub _print_cache_stat
 
 sub _print_mime_stat
 {
-	my ($self, $outdir, $year, $month, $day) = @_;
+	my ($self, $outdir, $year, $month, $day, $week) = @_;
 
 	my $stat_date = $self->set_date($year, $month, $day);
 
@@ -1888,6 +2027,9 @@ sub _print_mime_stat
 	}
 	if (!$month) {
 		$type = 'month';
+	}
+	if ($week) {
+		$type = 'day';
 	}
 
 	# Load code statistics
@@ -1911,7 +2053,7 @@ sub _print_mime_stat
 
 	my $file = $outdir . '/mime_type.html';
 	my $out = new IO::File;
-	$out->open(">$file") || die "ERROR: Unable to open $file. $!\n";
+	$out->open(">$file") || $self->localdie("ERROR: Unable to open $file. $!\n");
 
 	my $sortpos = 1;
 	$sortpos = 2 if ($self->{OrderMime} eq 'bytes');
@@ -1919,9 +2061,10 @@ sub _print_mime_stat
 
 	# Print the HTML header
 	my $cal = $self->_get_calendar($stat_date, $type, $outdir);
+	$cal = '' if ($week);
 	$self->_print_header(\$out, $self->{menu}, $cal, $sortpos);
 	# Print title and calendar view
-	print $out $self->_print_title($Translate{'Mime_title'}, $stat_date);
+	print $out $self->_print_title($Translate{'Mime_title'}, $stat_date, $week);
 
 	my %data = ();
 	$total_count ||= 1;
@@ -2007,7 +2150,7 @@ sub _print_mime_stat
 
 sub _print_network_stat
 {
-	my ($self, $outdir, $year, $month, $day) = @_;
+	my ($self, $outdir, $year, $month, $day, $week) = @_;
 
 	my $stat_date = $self->set_date($year, $month, $day);
 
@@ -2017,6 +2160,9 @@ sub _print_network_stat
 	}
 	if (!$month) {
 		$type = 'month';
+	}
+	if ($week) {
+		$type = 'day';
 	}
 
 	# Load code statistics
@@ -2077,11 +2223,12 @@ sub _print_network_stat
 
 	my $file = $outdir . '/network.html';
 	my $out = new IO::File;
-	$out->open(">$file") || die "ERROR: Unable to open $file. $!\n";
+	$out->open(">$file") || $self->localdie("ERROR: Unable to open $file. $!\n");
 	# Print the HTML header
 	my $cal = $self->_get_calendar($stat_date, $type, $outdir);
+	$cal = '' if ($week);
 	$self->_print_header(\$out, $self->{menu}, $cal, $sortpos);
-	print $out $self->_print_title($Translate{'Network_title'}, $stat_date);
+	print $out $self->_print_title($Translate{'Network_title'}, $stat_date, $week);
 
 	my $last = '23';
 	my $first = '00';
@@ -2207,7 +2354,7 @@ sub _print_network_stat
 		# Print the HTML header
 		my $cal = $self->_get_calendar($stat_date, $type, $outdir, '../../');
 		$self->_print_header(\$outnet, $self->{menu2}, $cal, $sortpos);
-		print $outnet $self->_print_title("$Translate{'Network_title'} $show -", $stat_date);
+		print $outnet $self->_print_title("$Translate{'Network_title'} $show -", $stat_date, $week);
 
 		my @hits = ();
 		my @bytes = ();
@@ -2282,7 +2429,7 @@ sub _print_network_stat
 
 sub _print_user_stat
 {
-	my ($self, $outdir, $year, $month, $day) = @_;
+	my ($self, $outdir, $year, $month, $day, $week) = @_;
 
 	my $stat_date = $self->set_date($year, $month, $day);
 
@@ -2292,6 +2439,9 @@ sub _print_user_stat
 	}
 	if (!$month) {
 		$type = 'month';
+	}
+	if ($week) {
+		$type = 'day';
 	}
 
 	# Load code statistics
@@ -2342,7 +2492,7 @@ sub _print_user_stat
 
 	my $file = $outdir . '/user.html';
 	my $out = new IO::File;
-	$out->open(">$file") || die "ERROR: Unable to open $file. $!\n";
+	$out->open(">$file") || $self->localdie("ERROR: Unable to open $file. $!\n");
 
 	my $sortpos = 1;
 	$sortpos = 2 if ($self->{OrderUser} eq 'bytes');
@@ -2350,6 +2500,7 @@ sub _print_user_stat
 
 	# Print the HTML header
 	my $cal = $self->_get_calendar($stat_date, $type, $outdir);
+	$cal = '' if ($week);
 	$self->_print_header(\$out, $self->{menu}, $cal, $sortpos);
 
 	my $last = '23';
@@ -2370,7 +2521,7 @@ sub _print_user_stat
 
 	%total_user_detail = ();
 
-	print $out $self->_print_title($Translate{'User_title'}, $stat_date);
+	print $out $self->_print_title($Translate{'User_title'}, $stat_date, $week);
 
 	print $out "<h3>$Translate{'User_number'}: $nuser</h3>\n";
 
@@ -2449,7 +2600,7 @@ sub _print_user_stat
 		# Print the HTML header
 		my $cal = $self->_get_calendar($stat_date, $type, $outdir, '../../');
 		$self->_print_header(\$outusr, $self->{menu2}, $cal, $sortpos);
-		print $outusr $self->_print_title("$Translate{'User_title'} $usr -", $stat_date);
+		print $outusr $self->_print_title("$Translate{'User_title'} $usr -", $stat_date, $week);
 
 		my @hits = ();
 		my @bytes = ();
@@ -2744,7 +2895,7 @@ sub _print_user_detail
 
 sub _print_top_url_stat
 {
-	my ($self, $outdir, $year, $month, $day) = @_;
+	my ($self, $outdir, $year, $month, $day, $week) = @_;
 
 	my $stat_date = $self->set_date($year, $month, $day);
 
@@ -2754,6 +2905,9 @@ sub _print_top_url_stat
 	}
 	if (!$month) {
 		$type = 'month';
+	}
+	if ($week) {
+		$type = 'day';
 	}
 
 	# Load code statistics
@@ -2792,7 +2946,7 @@ sub _print_top_url_stat
 
 	my $file = $outdir . '/url.html';
 	my $out = new IO::File;
-	$out->open(">$file") || die "ERROR: Unable to open $file. $!\n";
+	$out->open(">$file") || $self->localdie("ERROR: Unable to open $file. $!\n");
 
 	my $sortpos = 1;
 	$sortpos = 2 if ($self->{OrderUrl} eq 'bytes');
@@ -2800,13 +2954,14 @@ sub _print_top_url_stat
 
 	# Print the HTML header
 	my $cal = $self->_get_calendar($stat_date, $type, $outdir);
+	$cal = '' if ($week);
 	$self->_print_header(\$out, $self->{menu}, $cal, 100);
 	print $out "<h3>$Translate{'Url_number'}: $nurl</h3>\n";
 	for my $tpe ('Hits', 'Bytes', 'Duration') {
 		my $t1 = $Translate{"Url_${tpe}_title"};
 		$t1 =~ s/\%d/$self->{TopNumber}/;
 		if ($tpe eq 'Hits') {
-			print $out $self->_print_title($t1, $stat_date);
+			print $out $self->_print_title($t1, $stat_date, $week);
 		} else {
 			print $out "<h4>$t1 $stat_date</h4><div class=\"line-separator\"></div>\n";
 		}
@@ -2913,7 +3068,7 @@ sub _print_top_url_stat
 
 sub _print_top_domain_stat
 {
-	my ($self, $outdir, $year, $month, $day) = @_;
+	my ($self, $outdir, $year, $month, $day, $week) = @_;
 
 	my $stat_date = $self->set_date($year, $month, $day);
 
@@ -2923,6 +3078,9 @@ sub _print_top_domain_stat
 	}
 	if (!$month) {
 		$type = 'month';
+	}
+	if ($week) {
+		$type = 'day';
 	}
 
 	# Load code statistics
@@ -3004,7 +3162,7 @@ sub _print_top_domain_stat
 
 	my $file = $outdir . '/domain.html';
 	my $out = new IO::File;
-	$out->open(">$file") || die "ERROR: Unable to open $file. $!\n";
+	$out->open(">$file") || $self->localdie("ERROR: Unable to open $file. $!\n");
 
 	my $sortpos = 1;
 	$sortpos = 2 if ($self->{OrderUrl} eq 'bytes');
@@ -3012,6 +3170,7 @@ sub _print_top_domain_stat
 
 	# Print the HTML header
 	my $cal = $self->_get_calendar($stat_date, $type, $outdir);
+	$cal = '' if ($week);
 	$self->_print_header(\$out, $self->{menu}, $cal, 100);
 	print $out "<h3>$Translate{'Domain_number'}: $nurl</h3>\n";
 
@@ -3023,7 +3182,7 @@ sub _print_top_domain_stat
 
 		if ($tpe eq 'Hits') {
 
-			print $out $self->_print_title($t1, $stat_date);
+			print $out $self->_print_title($t1, $stat_date, $week);
 
 			my %data = ();
 			foreach my $dom (keys %perdomain) {
@@ -3183,7 +3342,7 @@ sub _gen_summary
 	my ($self, $outdir) = @_;
 
 	# Get all day subdirectory
-        opendir(DIR, "$outdir") or die "ERROR: Can't read directory $outdir, $!\n";
+        opendir(DIR, "$outdir") or $self->localdie("ERROR: Can't read directory $outdir, $!\n");
         my @dirs = grep { /^\d{4}$/ && -d "$outdir/$_" } readdir(DIR);
         closedir DIR;
 
@@ -3217,7 +3376,7 @@ sub _gen_summary
 	}
 	my $file = $outdir . '/index.html';
 	my $out = new IO::File;
-	$out->open(">$file") || die "ERROR: Unable to open $file. $!\n";
+	$out->open(">$file") || $self->localdie("ERROR: Unable to open $file. $!\n");
 	# Print the HTML header
 	$self->_print_header(\$out);
 	my $colspn = 2;
@@ -3290,12 +3449,12 @@ sub _gen_summary
 
 sub parse_config
 {
-	my ($file, $log_file, $rebuild) = @_;
+	my ($self, $file, $log_file, $rebuild) = @_;
 
-	die "FATAL: no configuration file!\n" if (!-e $file);
+	$self->localdie("FATAL: no configuration file!\n") if (!-e $file);
 
 	my %opt = ();
-	open(CONF, $file) or die "ERROR: can't open file $file, $!\n";
+	open(CONF, $file) or $self->localdie("ERROR: can't open file $file, $!\n");
 	while (my $l = <CONF>) {
 		chomp($l);
 		next if (!$l || ($l =~ /^[\s\t]*#/));
@@ -3310,39 +3469,45 @@ sub parse_config
 	# Check config
 	if (!exists $opt{Output} || !-d $opt{Output}) {
 		print STDERR "Error: you must give a valid output directory. See option: Output\n";
+		unlink($self->{pidfile});
 		exit 0;
 	}
 	if ( !$opt{LogFile} || !-f $opt{LogFile} ) {
 		if (!$rebuild) {
 			print STDERR "Error: you must give a valid path to the Squid log file. See LogFile or option -l\n";
+			unlink($self->{pidfile});
 			exit 0;
 		}
 	}
 	if (exists $opt{DateFormat}) {
 		if ( ($opt{DateFormat} !~ m#\%y#) || (($opt{DateFormat} !~ m#\%m#) && ($opt{DateFormat} !~ m#\%M#) )|| ($opt{DateFormat} !~ m#\%d#) ) {
 			print STDERR "Error: bad date format: $opt{DateFormat}, must have \%y, \%m or \%M, \%d. See DateFormat option.\n";
+			unlink($self->{pidfile});
 			exit 0;
 		}
 	}
 	if ($opt{Lang} && !-e $opt{Lang}) {
 		print STDERR "Error: can't find translation file $opt{Lang}. See option: Lang\n";
+		unlink($self->{pidfile});
 		exit 0;
 	}
 	if ($opt{ImgFormat} && !grep(/^$opt{ImgFormat}$/, 'png','jpg')) {
 		print STDERR "Error: unknown image format. See option: ImgFormat\n";
+		unlink($self->{pidfile});
 		exit 0;
 	}
+
 	return %opt;
 }
 
 sub parse_network_aliases
 {
-	my ($file) = @_;
+	my ($self, $file) = @_;
 
 	return if (!$file || !-f $file);
 
 	my %alias = ();
-	open(ALIAS, $file) or die "ERROR: can't open network aliases file $file, $!\n";
+	open(ALIAS, $file) or $self->localdie("ERROR: can't open network aliases file $file, $!\n");
 	my $i = 0;
 	while (my $l = <ALIAS>) {
 		chomp($l);
@@ -3356,12 +3521,12 @@ sub parse_network_aliases
 				$r =~ s/^\^//;
 				# If this is not a cidr notation
 				if ($r !~ /^\d+\.\d+\.\d+\.\d+\/\d+$/) {
-					&check_regex($r, "$file at line $i");
+					$self->check_regex($r, "$file at line $i");
 				}
 				$alias{"$r"} = $data[0];
 			}
 		} else {
-			die "ERROR: wrong format in network aliases file $file, line $i\n";
+			$self->localdie("ERROR: wrong format in network aliases file $file, line $i\n");
 		}
 	}
 	close(ALIAS);
@@ -3371,12 +3536,12 @@ sub parse_network_aliases
 
 sub parse_user_aliases
 {
-	my ($file) = @_;
+	my ($self, $file) = @_;
 
 	return if (!$file || !-f $file);
 
 	my %alias = ();
-	open(ALIAS, $file) or die "ERROR: can't open user aliases file $file, $!\n";
+	open(ALIAS, $file) or $self->localdie("ERROR: can't open user aliases file $file, $!\n");
 	my $i = 0;
 	while (my $l = <ALIAS>) {
 		chomp($l);
@@ -3389,11 +3554,11 @@ sub parse_user_aliases
 			foreach my $r (@rg) {
 				$r =~ s/^\^//;
 				$r =~ s/([^\\])\$$/$1/;
-				&check_regex($r, "$file at line $i");
+				$self->check_regex($r, "$file at line $i");
 				$alias{"$r"} = $data[0];
 			}
 		} else {
-			die "ERROR: wrong format in user aliases file $file, line $i\n";
+			$self->localdie("ERROR: wrong format in user aliases file $file, line $i\n");
 		}
 	}
 	close(ALIAS);
@@ -3403,12 +3568,12 @@ sub parse_user_aliases
 
 sub parse_exclusion
 {
-	my ($file) = @_;
+	my ($self, $file) = @_;
 
 	return if (!$file || !-f $file);
 
 	my %exclusion = ();
-	open(EXCLUDED, $file) or die "ERROR: can't open exclusion file $file, $!\n";
+	open(EXCLUDED, $file) or $self->localdie("ERROR: can't open exclusion file $file, $!\n");
 	my $i = 0;
 	while (my $l = <EXCLUDED>) {
 		chomp($l);
@@ -3421,17 +3586,50 @@ sub parse_exclusion
 			my @rg =  split(m#[\s\t]+#, $2);
 			foreach my $r (@rg) {
 				next if ($lbl eq 'networks');
-				&check_regex($r, "$file at line $i");
+				$self->check_regex($r, "$file at line $i");
 			}
 			push(@{$exclusion{$lbl}}, @rg);
 		} else {
 			# backward compatibility is not more supported
-			die "ERROR: wrong line format in file $file at line $i\n";
+			$self->localdie("ERROR: wrong line format in file $file at line $i\n");
 		}
 	}
 	close(EXCLUDED);
 
 	return %exclusion;
+}
+
+sub parse_inclusion
+{
+	my ($self, $file) = @_;
+
+	return if (!$file || !-f $file);
+
+	my %inclusion = ();
+	open(INCLUDED, $file) or $self->localdie("ERROR: can't open inclusion file $file, $!\n");
+	my $i = 0;
+	while (my $l = <INCLUDED>) {
+		chomp($l);
+		$i++;
+		next if (!$l || ($l =~ /^[\s\t]*#/));
+		# remove comments at end of line
+		$l =~ s/[\s\t]*#.*//;
+		if ($l =~ m#^(USER|CLIENT|NETWORK)[\s\t]+(.*)#) {
+			my $lbl = lc($1) . 's';
+			my @rg =  split(m#[\s\t]+#, $2);
+			foreach my $r (@rg) {
+				next if ($lbl eq 'networks');
+				$self->check_regex($r, "$file at line $i");
+			}
+			push(@{$inclusion{$lbl}}, @rg);
+		} else {
+			# backward compatibility is not more supported
+			$self->localdie("ERROR: wrong line format in file $file at line $i\n");
+		}
+	}
+	close(INCLUDED);
+
+	return %inclusion;
 }
 
 # User URL-encode
@@ -3482,10 +3680,13 @@ sub format_bytes
 
 sub _print_title
 {
-	my ($self, $title, $stat_date) = @_;
+	my ($self, $title, $stat_date, $week) = @_;
+
+	my $week_title = '';
+	$week_title = " $Translate{Week} $week" if ($week);
 
 	my $para = qq{
-<h4>$title $stat_date</h4>
+<h4>$title $stat_date$week_title</h4>
 <div class="line-separator"></div>
 };
 
@@ -3499,30 +3700,78 @@ sub _get_calendar
 	my $para = "<div id=\"calendar\">\n";
 	if ($type eq 'day') {
 		$para .= "<table><tr><th colspan=\"8\">$stat_date</th></tr>\n";
-		for my $i ('01' .. '32') {
-			$para .= "<tr>" if (grep(/^$i$/, '01', '09', '17','25'));
-			if ($i == 32) {
-				$para .= "<td>&nbsp;</td>";
-			} elsif (-f "$outdir/$i/index.html") {
-				$para .= "<td><a href=\"$prefix$i/index.html\">$i</a></td>";
-			} else {
-				$para .= "<td>$i</td>";
+		my @wday = qw(Mo Tu We Th Fr Sa Su);
+		my @std_day = qw(Su Mo Tu We Th Fr Sa);
+		my %day_lbl = ();
+		if (exists $Translate{WeekDay}) {
+			my @tmpwday = split(/\s+/, $Translate{WeekDay});
+			for (my $i = 0; $i <= $#std_day; $i++) {
+				$day_lbl{$std_day[$i]} = $tmpwday[$i];
 			}
-			$para .= "</tr>\n" if (grep(/^$i$/, '08', '16', '24', '32'));
+		} else {
+			for (my $i = 0; $i <= $#wday; $i++) {
+				$day_lbl{$wday[$i]} = $wday[$i];
+			}
+		}
+		$para .= "<tr><td>&nbsp;</td>";
+		map { $para .= '<td align="center">' . $day_lbl{$_} . '</td>'; } @wday;
+		$para .= "</tr>\n";
+
+		$stat_date =~ /^(\d+)-(\d+)$/;
+		my $year = $1 || '';
+		my $month = $2 || '';
+
+		my @currow = ('','','','','','','');
+		my $old_week = 0;
+		my $d = '';
+		for $d ("01" .. "31") {
+			my $wd = &get_day_of_week($year,$month,$d);
+			my $wn =  &get_week_number($year,$month,$d);
+			next if ($wn == -1);
+			$old_week = $wn;
+			if (-f "$outdir/$d/index.html") {
+				$currow[$wd-1] = "<td><a href=\"$prefix$d/index.html\">$d</a></td>";
+			} else {
+				$currow[$wd-1] = "<td>$d</td>";
+			}
+
+			if ($wd == 7) {
+				my $week = "<th>" . sprintf("%02d", $wn+1) . "</th>";
+				my $ww = sprintf("%02d", $wn+1);
+				if (!-f "$outdir/week$ww") {
+					$week = "<th>$ww</th>" if (grep(/href/, @currow));
+				} else {
+					$week = "<th><a href=\"$self->{WebUrl}/$year/week$ww\">$ww</a></th>" if (grep(/href/, @currow));
+				}
+				map { $_ = "<td>&nbsp;</td>" if ($_ eq ''); } @currow;
+				$para .= "<tr>$week" . join('', @currow) . "</tr>\n";
+				@currow = ('','','','','','','');
+			}
+		}
+		map { $_ = "<td>&nbsp;</td>" if ($_ eq ''); } @currow;
+		my $date = $year . $month . $d;
+		my $wn = &get_week_number($year,$month,28);
+		if (($wn == $old_week) || grep(/href/, @currow)) {
+			my $week = "<th>" . sprintf("%02d", $wn+1) . "</th>";
+			$week = "<th><a href=\"$self->{WebUrl}/$year/week" . sprintf("%02d", $wn+1) . "\">" . sprintf("%02d", $wn+1) . "</a></th>" if (grep(/href/, @currow));
+			$para .= "<tr>$week" . join('', @currow) . "</tr>\n";
 		}
 		$para .= "</table>\n";
+
 	} elsif ($type eq 'month') {
+
 		$para .= "<table><tr><th colspan=\"4\">$stat_date</th></tr>\n";
 		for my $i ('01' .. '12') {
-			$para .= "<tr>" if (grep(/^$i$/, '01', '05', '09'));
+			$para .= "<tr>" if (grep(/^$i$/, '01', '04', '07','10'));
 			if (-f "$outdir/$i/index.html") {
 				$para .= "<td><a href=\"$prefix$i/index.html\">$Translate{$i}</a></td>";
 			} else {
 				$para .= "<td>$Translate{$i}</td>";
 			}
-			$para .= "</tr>\n" if (grep(/^$i$/, '04', '08', '12'));
+			$para .= "</tr>\n" if (grep(/^$i$/, '03', '06', '09', '12'));
 		}
 		$para .= "</table>\n";
+
 	}
 	$para .= "</div>\n";
 
@@ -3575,12 +3824,28 @@ sub flotr2_bargraph
 		return days[(pos - 1) % 31];
 };
 		$numticks = 31;
+	} elsif ($xtype =~ /\[.*\]/) {
+		$xlabel = qq{var days = $xtype;
+		return pos;
+};
+		$numticks = 7;
 	} else  {
 		$xlabel = qq{var hours = [00,01,02,03,04,05,06,07,08,09,10,11,12,13,14,15,16,17,18,19,20,21,22,23];
 		return hours[pos % 24];
 };
 		$numticks = 24;
 	}
+
+	my $dateTracker_lblopts = '';
+	map { if (/label: "([^"]+)"/) { $dateTracker_lblopts .= "'$1',"; } } @legend;
+	$dateTracker_lblopts =~ s/,$//;
+	$dateTracker_lblopts = "[$dateTracker_lblopts]";
+
+	my $dateTracker_dataopts = '';
+	map { if (/var (d\d+) =/) { $dateTracker_dataopts .= "$1,"; } } @data;
+	$dateTracker_dataopts =~ s/,$//;
+	$dateTracker_dataopts = "[$dateTracker_dataopts]";
+
 	return <<EOF;
 <div id="$divid"></div>
 <script type="text/javascript">
@@ -3596,7 +3861,7 @@ $month_array
         mouse: {
             track: true,
             relative: true,
-	    trackFormatter: function(obj){ return dateTracker(obj,'$xtype') },
+	    trackFormatter: function(obj){ return dateTracker(obj,'$xtype',$dateTracker_lblopts,$dateTracker_dataopts) },
         },
         yaxis: {
             min: 0,
@@ -3769,11 +4034,11 @@ EOF
 
 sub check_regex
 {
-	my ($pattern, $label) = @_;
+	my ($self, $pattern, $label) = @_;
 
 	eval { $pattern =~ m/^$pattern$/i;};
 	if ($@) {
-		die "FATAL: $label invalid regex '$pattern', $!\n";
+		$self->localdie("FATAL: $label invalid regex '$pattern', $!\n");
 	}
 }
 
@@ -3801,7 +4066,7 @@ sub _gen_year_summary
 	my ($self, $outdir) = @_;
 
 	# Get all day subdirectory
-        opendir(DIR, "$outdir") or die "ERROR: Can't read directory $outdir, $!\n";
+        opendir(DIR, "$outdir") or $self->localdie("ERROR: Can't read directory $outdir, $!\n");
         my @dirs = grep { /^\d{4}$/ && -d "$outdir/$_" } readdir(DIR);
         closedir DIR;
 
@@ -3813,7 +4078,7 @@ sub _gen_year_summary
 	}
 	my $file = $outdir . '/index.html';
 	my $out = new IO::File;
-	$out->open(">$file") || die "ERROR: Unable to open $file. $!\n";
+	$out->open(">$file") || $self->localdie("ERROR: Unable to open $file. $!\n");
 	# Print the HTML header
 	$self->_print_header(\$out);
 	my $colspn = 2;
@@ -3856,6 +4121,126 @@ sub _gen_year_summary
 
 }
 
+####
+# Get the week day of a date
+####
+sub get_day_of_week
+{
+	my ($year, $month, $day) = @_;
+
+#       %u     The day of the week as a decimal, range 1 to 7, Monday being 1.
+#       %w     The day of the week as a decimal, range 0 to 6, Sunday being 0.
+
+	#my $weekDay = POSIX::strftime("%u", gmtime timelocal_nocheck(0,0,0,$day,--$month,$year));
+	my $weekDay = POSIX::strftime("%u", 1,1,1,$day,--$month,$year-1900);
+
+	return $weekDay;
+}
+
+####
+# Get week number
+####
+sub get_week_number
+{
+	my ($year, $month, $day) = @_;
+
+#       %U     The week number of the current year as a decimal number, range 00 to 53, starting with the first
+#              Sunday as the first day of week 01.
+#       %V     The  ISO 8601  week  number (see NOTES) of the current year as a decimal number, range 01 to 53,
+#              where week 1 is the first week that has at least 4 days in the new year.
+#       %W     The week number of the current year as a decimal number, range 00 to 53, starting with the first
+#              Monday as the first day of week 01.
+
+	# Check if the date is valide first
+	my $datefmt = POSIX::strftime("%F", 1, 1, 1, $day, $month - 1, $year - 1900);
+	if ($datefmt ne "$year-$month-$day") {
+		return -1;
+	}
+	my $weekNumber = POSIX::strftime("%W", 1, 1, 1, $day, $month - 1, $year - 1900);
+
+	return $weekNumber;
+}
+
+# Returns all days following the week number
+sub get_wdays_per_month
+{
+	my $wn = shift;
+	my ($year, $month) = split(/\-/, shift);
+	my @months = ();
+	my @retdays = ();
+
+	$month ||= '01';
+	push(@months, "$year$month");
+	my $start_month = $month;
+	if ($month eq '01') {
+		unshift(@months, ($year - 1) . "12");
+	} else {
+		unshift(@months, $year . sprintf("%02d", $month - 1));
+	}
+	if ($month == 12) {
+		push(@months, ($year+1) . "01");
+	} else {
+		push(@months, $year . sprintf("%02d", $month + 1));
+	}
+
+	foreach my $d (@months) {
+		$d =~ /^(\d{4})(\d{2})$/;
+		my $y = $1;
+		my $m = $2;
+		foreach my $day ("01" .. "31") {
+			# Check if the date is valide first
+			my $datefmt = POSIX::strftime("%F", 1, 1, 1, $day, $m - 1, $y - 1900);
+			if ($datefmt ne "$y-$m-$day") {
+				next;
+			}
+			my $weekNumber = POSIX::strftime("%W", 1, 1, 1, $day, $m - 1, $y - 1900);
+			if ( ($weekNumber == $wn) || ( ($weekNumber eq '00') && (($wn == 1) || ($wn >= 52)) ) ) {
+				push(@retdays, "$year-$m-$day");
+				return @retdays if ($#retdays == 6);
+			}
+			next if ($weekNumber > $wn);
+		}
+	}
+
+	return @retdays;
+}
+
+# Returns all days following the week number
+sub get_wdays_per_year
+{
+	my ($wn, $year) = @_;
+
+	my @months = ();
+	my @retdays = ();
+
+	foreach ("01" .. "12") {
+		push(@months, "$year$_");
+	}
+	my $start_month = "01";;
+	unshift(@months, ($year - 1) . "12");
+	push(@months, ($year+1) . "01");
+
+	foreach my $d (@months) {
+		$d =~ /^(\d{4})(\d{2})$/;
+		my $y = $1;
+		my $m = $2;
+		foreach my $day ("01" .. "31") {
+			# Check if the date is valide first
+			my $datefmt = POSIX::strftime("%F", 1, 1, 1, $day, $m - 1, $y - 1900);
+			if ($datefmt ne "$y-$m-$day") {
+				next;
+			}
+			my $weekNumber = POSIX::strftime("%W", 1, 1, 1, $day, $m - 1, $y - 1900);
+			if ( ($weekNumber == $wn) || ( ($weekNumber eq '00') && (($wn == 1) || ($wn >= 52)) ) ) {
+				push(@retdays, "$day");
+				return @retdays if ($#retdays == 6);
+			}
+			next if ($weekNumber > $wn);
+		}
+	}
+
+	return @retdays;
+}
 
 1;
 

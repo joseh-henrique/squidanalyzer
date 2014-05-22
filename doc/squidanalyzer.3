@@ -124,7 +124,7 @@
 .\" ========================================================================
 .\"
 .IX Title "SQUIDANALYZER 1"
-.TH SQUIDANALYZER 1 "2013-12-23" "perl v5.14.2" "User Contributed Perl Documentation"
+.TH SQUIDANALYZER 1 "2014-05-15" "perl v5.14.2" "User Contributed Perl Documentation"
 .\" For nroff, turn off justification.  Always turn off hyphenation; it makes
 .\" way too many mistakes in technical documents.
 .if n .ad l
@@ -135,7 +135,7 @@ SquidAnalyzer \- Squid access log report generation tool
 .IX Header "DESCRIPTION"
 SquidAnalyzer parse native access log format of the Squid proxy and
 generate general statistics about hits, bytes, users, networks, top
-url and top second level domain.
+url, top second level domain and denied URLs.
 .PP
 Statistic reports are oriented to user and bandwidth control, this
 is not a pure cache statistics generator. SquidAnalyzer use flat
@@ -264,13 +264,22 @@ If your squid logfiles are rotated then cron isn't going to give the expected
 result as there exists a time between when the cron is run and the logfiles
 are rotated. It would be better to call squid-analyzer from logrotate, eg:
 .PP
-.Vb 3
-\&        prerotate
-\&                /usr/local/bin/squid\-analyzer
-\&        endscript
+.Vb 12
+\&        /var/log/proxy/squid\-access.log {
+\&            daily
+\&            compress
+\&            rotate 730
+\&            missingok
+\&            nocreate
+\&            sharedscripts
+\&            postrotate
+\&                test ! \-e /var/run/squid.pid || /usr/sbin/squid \-k rotate
+\&                /usr/bin/squid\-analyzer \-d \-l /var/log/proxy/squid\-access.log.1
+\&            endscript
+\&        }
 .Ve
 .PP
-You can use network name instead of network ip addresses by using the
+You can also use network name instead of network ip addresses by using the
 network-aliases file. Also if you don't have authentication enable and
 want to replace client ip addresses by some know user or computer you
 can use the user-aliases file to do so.
@@ -295,6 +304,8 @@ script. Here are authorized usage:
 \&                                     By default: /var/log/squid/access.log
 \&        \-p | \-\-preserve number     : used to set the statistic obsolescence in
 \&                                     number of month. Older stats will be removed.
+\&        \-P | \-\-pid_dir directory   : set directory where pid file will be stored.
+\&                                     Default /tmp/
 \&        \-r | \-\-rebuild             : use this option to rebuild all html and graphs
 \&                                     output from all data files.
 \&        \-v | version               : show version and exit.
@@ -330,6 +341,24 @@ You should give a path that can be read by a Web browser.
 .IX Item "WebUrl"
 The \s-1URL\s0 of the SquidAnalyzer javascript, \s-1HTML\s0 and images files.
 Default: /squidreport
+.IP "CustomHeader" 4
+.IX Item "CustomHeader"
+This directive allow you to replace the SquidAnalyze logo by your custom
+logo. The default value is defined as follow:
+.Sp
+.Vb 3
+\&        <a href="$self\->{WebUrl}">
+\&        <img src="$self\->{WebUrl}images/logo\-squidanalyzer.png" title="SquidAnalyzer $VERSION" border="0">
+\&        </a> SquidAnalyzer
+.Ve
+.Sp
+Feel free to define your own header but take care to not break current design.
+For example:
+.Sp
+.Vb 2
+\&        CustomHeader   <a href="http://my.isp.dom/"><img src="http://my.isp.dom/logo.png" title="My ISP link" border="0" width="100" height="110"></a> My ISP Company
+\&                                                                                           126,1         Bas
+.Ve
 .IP "LogFile squid_access_log_file" 4
 .IX Item "LogFile squid_access_log_file"
 Set the path to the Squid log file.
@@ -455,6 +484,44 @@ See example bellow:
 .Ve
 .Sp
 you can have multiple line of the same exclusion type.
+.IP "Include inclusion_file" 4
+.IX Item "Include inclusion_file"
+Used to set client ip addresses, network addresses or auth login
+to include into the report. All others will not be included. It
+works as the opposite of the Include parameter.
+.Sp
+You can define one by line inclusion by specifying first the type of the
+inclusion (\s-1USER\s0 or \s-1CLIENT\s0) and a space separated list of valid regex.
+.Sp
+You can also use the \s-1NETWORK\s0 type to define network address with netmask
+using the \s-1CIDR\s0 notation: xxx.xxx.xxx.xxx/n
+.Sp
+See example bellow:
+.Sp
+.Vb 7
+\&        NETWORK        192.168.1.0/24 10.10.0.0/16
+\&        CLIENT         192\e.168\e.1\e.2 
+\&        CLIENT         10\e.169\e.1\e.\ed+ 192\e.168\e.10\e..*
+\&        USER           myloginstr
+\&        USER           guestlogin\ed+ guestdemo
+\&        URI            http:\e/\e/myinternetdomain.dom.*
+\&        URI            .*\e.webmail\e.com\e/.*\e/login\e.php.*
+.Ve
+.Sp
+you can have multiple line of the same inclusion type.
+.IP "ExcludedMethods" 4
+.IX Item "ExcludedMethods"
+This directive allow exclusion of some unwanted methods in report statistics
+like \s-1HEAD\s0, \s-1POST\s0, \s-1CONNECT\s0, etc. Can be a comma separated list of methods.
+.IP "ExcludedMimes" 4
+.IX Item "ExcludedMimes"
+This directive allow exclusion of some unwanted mimetypes in report statistics
+like text/html, text/plain, or more generally text/*, etc. Can be a comma
+separated list of perl regular expression. Ex:
+.Sp
+.Vb 1
+\&        ExcludedMimes   text/.*,image/.*
+.Ve
 .IP "Lang language_file" 4
 .IX Item "Lang language_file"
 Used to set the translation file to be used. Value must be set to
@@ -494,7 +561,7 @@ with a Locale set to fr_FR.
 Gilles \s-1DAROLD\s0 <gilles@darold.net>
 .SH "COPYRIGHT"
 .IX Header "COPYRIGHT"
-Copyright (c) 2001\-2013 Gilles \s-1DAROLD\s0
+Copyright (c) 2001\-2014 Gilles \s-1DAROLD\s0
 .PP
 This package is free software and published under the \s-1GPL\s0 v3 or above
 license.

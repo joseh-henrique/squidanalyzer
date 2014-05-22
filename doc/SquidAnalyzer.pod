@@ -7,7 +7,7 @@ SquidAnalyzer - Squid access log report generation tool
 
 SquidAnalyzer parse native access log format of the Squid proxy and
 generate general statistics about hits, bytes, users, networks, top
-url and top second level domain.
+url, top second level domain and denied URLs.
 
 Statistic reports are oriented to user and bandwidth control, this
 is not a pure cache statistics generator. SquidAnalyzer use flat
@@ -127,11 +127,20 @@ If your squid logfiles are rotated then cron isn't going to give the expected
 result as there exists a time between when the cron is run and the logfiles
 are rotated. It would be better to call squid-analyzer from logrotate, eg:
 
-	prerotate
-		/usr/local/bin/squid-analyzer
-	endscript
+	/var/log/proxy/squid-access.log {
+	    daily
+	    compress
+	    rotate 730
+	    missingok
+	    nocreate
+	    sharedscripts
+	    postrotate
+		test ! -e /var/run/squid.pid || /usr/sbin/squid -k rotate
+		/usr/bin/squid-analyzer -d -l /var/log/proxy/squid-access.log.1
+	    endscript
+	}
 
-You can use network name instead of network ip addresses by using the
+You can also use network name instead of network ip addresses by using the
 network-aliases file. Also if you don't have authentication enable and
 want to replace client ip addresses by some know user or computer you
 can use the user-aliases file to do so. 
@@ -156,6 +165,8 @@ script. Here are authorized usage:
 				     By default: /var/log/squid/access.log
 	-p | --preserve number     : used to set the statistic obsolescence in
 				     number of month. Older stats will be removed.
+	-P | --pid_dir directory   : set directory where pid file will be stored.
+				     Default /tmp/
 	-r | --rebuild             : use this option to rebuild all html and graphs
 				     output from all data files.
 	-v | version               : show version and exit.
@@ -194,6 +205,21 @@ You should give a path that can be read by a Web browser.
 
 The URL of the SquidAnalyzer javascript, HTML and images files.
 Default: /squidreport
+
+=item CustomHeader
+
+This directive allow you to replace the SquidAnalyze logo by your custom
+logo. The default value is defined as follow:
+
+	<a href="$self->{WebUrl}">
+	<img src="$self->{WebUrl}images/logo-squidanalyzer.png" title="SquidAnalyzer $VERSION" border="0">
+	</a> SquidAnalyzer
+
+Feel free to define your own header but take care to not break current design.
+For example:
+
+	CustomHeader   <a href="http://my.isp.dom/"><img src="http://my.isp.dom/logo.png" title="My ISP link" border="0" width="100" height="110"></a> My ISP Company
+                                                                                           126,1         Bas
 
 =item LogFile squid_access_log_file
 
@@ -324,6 +350,43 @@ See example bellow:
 
 you can have multiple line of the same exclusion type.
 
+=item Include inclusion_file
+
+Used to set client ip addresses, network addresses or auth login
+to include into the report. All others will not be included. It
+works as the opposite of the Include parameter.
+
+You can define one by line inclusion by specifying first the type of the
+inclusion (USER or CLIENT) and a space separated list of valid regex.
+
+You can also use the NETWORK type to define network address with netmask
+using the CIDR notation: xxx.xxx.xxx.xxx/n
+
+See example bellow:
+
+	NETWORK        192.168.1.0/24 10.10.0.0/16
+	CLIENT         192\.168\.1\.2 
+	CLIENT         10\.169\.1\.\d+ 192\.168\.10\..*
+	USER           myloginstr
+	USER           guestlogin\d+ guestdemo
+	URI            http:\/\/myinternetdomain.dom.*
+	URI            .*\.webmail\.com\/.*\/login\.php.*
+
+you can have multiple line of the same inclusion type.
+
+=item ExcludedMethods
+
+This directive allow exclusion of some unwanted methods in report statistics
+like HEAD, POST, CONNECT, etc. Can be a comma separated list of methods.
+
+=item ExcludedMimes
+
+This directive allow exclusion of some unwanted mimetypes in report statistics
+like text/html, text/plain, or more generally text/*, etc. Can be a comma
+separated list of perl regular expression. Ex:
+
+	ExcludedMimes   text/.*,image/.*
+
 =item Lang language_file
 
 Used to set the translation file to be used. Value must be set to
@@ -371,7 +434,7 @@ Gilles DAROLD <gilles@darold.net>
 
 =head1 COPYRIGHT
 
-Copyright (c) 2001-2013 Gilles DAROLD
+Copyright (c) 2001-2014 Gilles DAROLD
     
 This package is free software and published under the GPL v3 or above
 license.
